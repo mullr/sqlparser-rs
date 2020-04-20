@@ -227,7 +227,7 @@ impl<'a> Tokenizer<'a> {
             dialect,
             query: query.to_string(),
             line: 1,
-            col: 1,
+            col: 0,
         }
     }
 
@@ -241,7 +241,7 @@ impl<'a> Tokenizer<'a> {
             match &token {
                 Token::Whitespace(Whitespace::Newline) => {
                     self.line += 1;
-                    self.col = 1;
+                    self.col = 0;
                 }
 
                 Token::Whitespace(Whitespace::Tab) => self.col += 4,
