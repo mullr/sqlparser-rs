@@ -77,7 +77,8 @@ pub struct Parser {
 
 impl Parser {
     /// Parse the specified tokens
-    pub fn new(tokens: Vec<Token>) -> Self {
+    pub fn new(token_occurences: Vec<TokenOccurrence>) -> Self {
+        let tokens = token_occurences.into_iter().map(|to| to.token).collect();
         Parser { tokens, index: 0 }
     }
 

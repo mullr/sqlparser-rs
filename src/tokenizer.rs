@@ -23,6 +23,30 @@ use super::dialect::keywords::ALL_KEYWORDS;
 use super::dialect::Dialect;
 use std::fmt;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineColumn {
+    pub line: u64,
+    pub column: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub start: LineColumn,
+    pub end: LineColumn,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenOccurrence {
+    pub token: Token,
+    pub span: Span,
+}
+
+impl fmt::Display for TokenOccurrence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.token.fmt(f)
+    }
+}
+
 /// SQL Token enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -232,12 +256,17 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Tokenize the statement and produce a vector of tokens
-    pub fn tokenize(&mut self) -> Result<Vec<Token>, TokenizerError> {
+    pub fn tokenize(&mut self) -> Result<Vec<TokenOccurrence>, TokenizerError> {
         let mut peekable = self.query.chars().peekable();
 
-        let mut tokens: Vec<Token> = vec![];
+        let mut tokens: Vec<TokenOccurrence> = vec![];
 
         while let Some(token) = self.next_token(&mut peekable)? {
+            let token_start = LineColumn {
+                line: self.line,
+                column: self.col,
+            };
+
             match &token {
                 Token::Whitespace(Whitespace::Newline) => {
                     self.line += 1;
@@ -252,8 +281,18 @@ impl<'a> Tokenizer<'a> {
                 _ => self.col += 1,
             }
 
-            tokens.push(token);
+            tokens.push(TokenOccurrence {
+                token,
+                span: Span {
+                    start: token_start,
+                    end: LineColumn {
+                        line: self.line,
+                        column: self.col,
+                    },
+                },
+            });
         }
+
         Ok(tokens)
     }
 
@@ -805,7 +844,8 @@ mod tests {
         compare(expected, tokens);
     }
 
-    fn compare(expected: Vec<Token>, actual: Vec<Token>) {
+    fn compare(expected: Vec<Token>, actual: Vec<TokenOccurrence>) {
+        let actual: Vec<_> =  actual.into_iter().map(|to| to.token).collect();
         //println!("------------------------------");
         //println!("tokens   = {:?}", actual);
         //println!("expected = {:?}", expected);
