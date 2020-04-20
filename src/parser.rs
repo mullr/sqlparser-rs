@@ -70,15 +70,14 @@ impl Error for ParserError {}
 
 /// SQL Parser
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<TokenOccurrence>,
     /// The index of the first unprocessed token in `self.tokens`
     index: usize,
 }
 
 impl Parser {
     /// Parse the specified tokens
-    pub fn new(token_occurences: Vec<TokenOccurrence>) -> Self {
-        let tokens = token_occurences.into_iter().map(|to| to.token).collect();
+    pub fn new(tokens: Vec<TokenOccurrence>) -> Self {
         Parser { tokens, index: 0 }
     }
 
@@ -113,7 +112,7 @@ impl Parser {
     /// stopping before the statement separator, if any.
     pub fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         match self.next_token() {
-            Some(t) => match t {
+            Some(token_occurence) => match token_occurence.token {
                 Token::Word(ref w) if w.keyword != "" => match w.keyword.as_ref() {
                     "SELECT" | "WITH" | "VALUES" => {
                         self.prev_token();
@@ -144,9 +143,9 @@ impl Parser {
                     self.prev_token();
                     Ok(Statement::Query(Box::new(self.parse_query()?)))
                 }
-                unexpected => self.expected(
+                _ => self.expected(
                     "a keyword at the beginning of a statement",
-                    Some(unexpected),
+                    Some(token_occurence),
                 ),
             },
             None => self.expected("SQL statement", None),
@@ -177,10 +176,10 @@ impl Parser {
 
     /// Parse an expression prefix
     pub fn parse_prefix(&mut self) -> Result<Expr, ParserError> {
-        let tok = self
+        let token_occurrence = self
             .next_token()
             .ok_or_else(|| ParserError::ParserError("Unexpected EOF".to_string()))?;
-        let expr = match tok {
+        let expr = match token_occurrence.token {
             Token::Word(w) => match w.keyword.as_ref() {
                 "TRUE" | "FALSE" | "NULL" => {
                     self.prev_token();
@@ -200,14 +199,19 @@ impl Parser {
                 "TIMESTAMP" => Ok(Expr::Value(Value::Timestamp(self.parse_literal_string()?))),
                 // Here `w` is a word, check if it's a part of a multi-part
                 // identifier, a function call, or a simple identifier:
-                _ => match self.peek_token() {
+                _ => match self.peek_token_plain() {
                     Some(Token::LParen) | Some(Token::Period) => {
                         let mut id_parts: Vec<Ident> = vec![w.to_ident()];
                         let mut ends_with_wildcard = false;
                         while self.consume_token(&Token::Period) {
                             match self.next_token() {
-                                Some(Token::Word(w)) => id_parts.push(w.to_ident()),
-                                Some(Token::Mult) => {
+                                Some(TokenOccurrence {
+                                    token: Token::Word(w),
+                                    ..
+                                }) => id_parts.push(w.to_ident()),
+                                Some(TokenOccurrence {
+                                    token: Token::Mult, ..
+                                }) => {
                                     ends_with_wildcard = true;
                                     break;
                                 }
@@ -258,7 +262,7 @@ impl Parser {
                 self.expect_token(&Token::RParen)?;
                 Ok(expr)
             }
-            unexpected => self.expected("an expression", Some(unexpected)),
+            _ => self.expected("an expression", Some(token_occurrence)),
         }?;
 
         if self.parse_keyword("COLLATE") {
@@ -323,7 +327,10 @@ impl Parser {
 
     pub fn parse_window_frame(&mut self) -> Result<WindowFrame, ParserError> {
         let units = match self.next_token() {
-            Some(Token::Word(w)) => w.keyword.parse::<WindowFrameUnits>()?,
+            Some(TokenOccurrence {
+                token: Token::Word(w),
+                ..
+            }) => w.keyword.parse::<WindowFrameUnits>()?,
             unexpected => return self.expected("ROWS, RANGE, GROUPS", unexpected),
         };
         let (start_bound, end_bound) = if self.parse_keyword("BETWEEN") {
@@ -430,7 +437,11 @@ impl Parser {
     // be split in two.
     pub fn parse_date_time_field(&mut self) -> Result<DateTimeField, ParserError> {
         let tok = self.next_token();
-        if let Some(Token::Word(ref k)) = tok {
+        if let Some(TokenOccurrence {
+            token: Token::Word(ref k),
+            ..
+        }) = tok
+        {
             match k.keyword.as_ref() {
                 "YEAR" => Ok(DateTimeField::Year),
                 "MONTH" => Ok(DateTimeField::Month),
@@ -513,7 +524,7 @@ impl Parser {
         debug!("parsing infix");
         let tok = self.next_token().unwrap(); // safe as EOF's precedence is the lowest
 
-        let regular_binary_operator = match tok {
+        let regular_binary_operator = match tok.token {
             Token::Eq => Some(BinaryOperator::Eq),
             Token::Neq => Some(BinaryOperator::NotEq),
             Token::Gt => Some(BinaryOperator::Gt),
@@ -547,7 +558,11 @@ impl Parser {
                 op,
                 right: Box::new(self.parse_subexpr(precedence)?),
             })
-        } else if let Token::Word(ref k) = tok {
+        } else if let TokenOccurrence {
+            token: Token::Word(ref k),
+            ..
+        } = tok
+        {
             match k.keyword.as_ref() {
                 "IS" => {
                     if self.parse_keyword("NULL") {
@@ -572,7 +587,7 @@ impl Parser {
                 // Can only happen if `get_next_precedence` got out of sync with this function
                 _ => panic!("No infix parser for token {:?}", tok),
             }
-        } else if Token::DoubleColon == tok {
+        } else if Token::DoubleColon == tok.token {
             self.parse_pg_cast(expr)
         } else {
             // Can only happen if `get_next_precedence` got out of sync with this function
@@ -630,23 +645,25 @@ impl Parser {
 
     /// Get the precedence of the next token
     pub fn get_next_precedence(&self) -> Result<u8, ParserError> {
-        if let Some(token) = self.peek_token() {
-            debug!("get_next_precedence() {:?}", token);
+        if let Some(token_occurrence) = self.peek_token() {
+            debug!("get_next_precedence() {:?}", token_occurrence);
 
-            match &token {
+            match &token_occurrence.token {
                 Token::Word(k) if k.keyword == "OR" => Ok(5),
                 Token::Word(k) if k.keyword == "AND" => Ok(10),
-                Token::Word(k) if k.keyword == "NOT" => match &self.peek_nth_token(1) {
-                    // The precedence of NOT varies depending on keyword that
-                    // follows it. If it is followed by IN, BETWEEN, or LIKE,
-                    // it takes on the precedence of those tokens. Otherwise it
-                    // is not an infix operator, and therefore has zero
-                    // precedence.
-                    Some(Token::Word(k)) if k.keyword == "IN" => Ok(Self::BETWEEN_PREC),
-                    Some(Token::Word(k)) if k.keyword == "BETWEEN" => Ok(Self::BETWEEN_PREC),
-                    Some(Token::Word(k)) if k.keyword == "LIKE" => Ok(Self::BETWEEN_PREC),
-                    _ => Ok(0),
-                },
+                Token::Word(k) if k.keyword == "NOT" => {
+                    match &self.peek_nth_token_plain(1) {
+                        // The precedence of NOT varies depending on keyword that
+                        // follows it. If it is followed by IN, BETWEEN, or LIKE,
+                        // it takes on the precedence of those tokens. Otherwise it
+                        // is not an infix operator, and therefore has zero
+                        // precedence.
+                        Some(Token::Word(k)) if k.keyword == "IN" => Ok(Self::BETWEEN_PREC),
+                        Some(Token::Word(k)) if k.keyword == "BETWEEN" => Ok(Self::BETWEEN_PREC),
+                        Some(Token::Word(k)) if k.keyword == "LIKE" => Ok(Self::BETWEEN_PREC),
+                        _ => Ok(0),
+                    }
+                }
                 Token::Word(k) if k.keyword == "IS" => Ok(17),
                 Token::Word(k) if k.keyword == "IN" => Ok(Self::BETWEEN_PREC),
                 Token::Word(k) if k.keyword == "BETWEEN" => Ok(Self::BETWEEN_PREC),
@@ -666,17 +683,20 @@ impl Parser {
 
     /// Return the first non-whitespace token that has not yet been processed
     /// (or None if reached end-of-file)
-    pub fn peek_token(&self) -> Option<Token> {
+    pub fn peek_token(&self) -> Option<TokenOccurrence> {
         self.peek_nth_token(0)
     }
 
     /// Return nth non-whitespace token that has not yet been processed
-    pub fn peek_nth_token(&self, mut n: usize) -> Option<Token> {
+    pub fn peek_nth_token(&self, mut n: usize) -> Option<TokenOccurrence> {
         let mut index = self.index;
         loop {
             index += 1;
             match self.tokens.get(index - 1) {
-                Some(Token::Whitespace(_)) => continue,
+                Some(TokenOccurrence {
+                    token: Token::Whitespace(_),
+                    ..
+                }) => continue,
                 non_whitespace => {
                     if n == 0 {
                         return non_whitespace.cloned();
@@ -687,21 +707,41 @@ impl Parser {
         }
     }
 
+    /// Like peek_token, but return the inner Token without the span
+    pub fn peek_token_plain(&self) -> Option<Token> {
+        self.peek_token().map(|to| to.token)
+    }
+
+    /// Like peek_nth_token, but return the inner Token without the span
+    pub fn peek_nth_token_plain(&self, n: usize) -> Option<Token> {
+        self.peek_nth_token(n).map(|to| to.token)
+    }
+
     /// Return the first non-whitespace token that has not yet been processed
     /// (or None if reached end-of-file) and mark it as processed. OK to call
     /// repeatedly after reaching EOF.
-    pub fn next_token(&mut self) -> Option<Token> {
+    pub fn next_token(&mut self) -> Option<TokenOccurrence> {
         loop {
             self.index += 1;
             match self.tokens.get(self.index - 1) {
-                Some(Token::Whitespace(_)) => continue,
+                Some(TokenOccurrence {
+                    token: Token::Whitespace(_),
+                    ..
+                }) => continue,
                 token => return token.cloned(),
             }
         }
     }
 
+
+    #[cfg(test)]
+    /// Like next_token, but return the inner Token without the span
+    pub fn next_token_plain(&mut self) -> Option<Token> {
+        self.next_token().map(|to| to.token)
+    }
+
     /// Return the first unprocessed token, possibly whitespace.
-    pub fn next_token_no_skip(&mut self) -> Option<&Token> {
+    pub fn next_token_no_skip(&mut self) -> Option<&TokenOccurrence> {
         self.index += 1;
         self.tokens.get(self.index - 1)
     }
@@ -713,7 +753,11 @@ impl Parser {
         loop {
             assert!(self.index > 0);
             self.index -= 1;
-            if let Some(Token::Whitespace(_)) = self.tokens.get(self.index) {
+            if let Some(TokenOccurrence {
+                token: Token::Whitespace(_),
+                ..
+            }) = self.tokens.get(self.index)
+            {
                 continue;
             }
             return;
@@ -721,7 +765,11 @@ impl Parser {
     }
 
     /// Report unexpected token
-    fn expected<T>(&self, expected: &str, found: Option<Token>) -> Result<T, ParserError> {
+    fn expected<T>(
+        &self,
+        expected: &str,
+        found: Option<TokenOccurrence>,
+    ) -> Result<T, ParserError> {
         parser_err!(format!(
             "Expected {}, found: {}",
             expected,
@@ -738,7 +786,10 @@ impl Parser {
         // the string actually represents a known keyword...
         assert!(keywords::ALL_KEYWORDS.contains(&expected));
         match self.peek_token() {
-            Some(Token::Word(ref k)) if expected.eq_ignore_ascii_case(&k.keyword) => {
+            Some(TokenOccurrence {
+                token: Token::Word(ref k),
+                ..
+            }) if expected.eq_ignore_ascii_case(&k.keyword) => {
                 self.next_token();
                 true
             }
@@ -772,7 +823,10 @@ impl Parser {
             );
         }
         match self.peek_token() {
-            Some(Token::Word(ref k)) => keywords
+            Some(TokenOccurrence {
+                token: Token::Word(ref k),
+                ..
+            }) => keywords
                 .iter()
                 .find(|keyword| keyword.eq_ignore_ascii_case(&k.keyword))
                 .map(|keyword| {
@@ -820,7 +874,7 @@ impl Parser {
     #[must_use]
     pub fn consume_token(&mut self, expected: &Token) -> bool {
         match &self.peek_token() {
-            Some(t) if *t == *expected => {
+            Some(to) if to.token == *expected => {
                 self.next_token();
                 true
             }
@@ -959,7 +1013,7 @@ impl Parser {
         loop {
             if let Some(constraint) = self.parse_optional_table_constraint()? {
                 constraints.push(constraint);
-            } else if let Some(Token::Word(column_name)) = self.peek_token() {
+            } else if let Some(Token::Word(column_name)) = self.peek_token_plain() {
                 self.next_token();
                 let data_type = self.parse_data_type()?;
                 let collation = if self.parse_keyword("COLLATE") {
@@ -969,7 +1023,7 @@ impl Parser {
                 };
                 let mut options = vec![];
                 loop {
-                    match self.peek_token() {
+                    match self.peek_token_plain() {
                         None | Some(Token::Comma) | Some(Token::RParen) => break,
                         _ => options.push(self.parse_column_option_def()?),
                     }
@@ -1041,7 +1095,10 @@ impl Parser {
             None
         };
         match self.next_token() {
-            Some(Token::Word(ref k)) if k.keyword == "PRIMARY" || k.keyword == "UNIQUE" => {
+            Some(TokenOccurrence {
+                token: Token::Word(ref k),
+                ..
+            }) if k.keyword == "PRIMARY" || k.keyword == "UNIQUE" => {
                 let is_primary = k.keyword == "PRIMARY";
                 if is_primary {
                     self.expect_keyword("KEY")?;
@@ -1053,7 +1110,10 @@ impl Parser {
                     is_primary,
                 }))
             }
-            Some(Token::Word(ref k)) if k.keyword == "FOREIGN" => {
+            Some(TokenOccurrence {
+                token: Token::Word(ref k),
+                ..
+            }) if k.keyword == "FOREIGN" => {
                 self.expect_keyword("KEY")?;
                 let columns = self.parse_parenthesized_column_list(Mandatory)?;
                 self.expect_keyword("REFERENCES")?;
@@ -1066,7 +1126,10 @@ impl Parser {
                     referred_columns,
                 }))
             }
-            Some(Token::Word(ref k)) if k.keyword == "CHECK" => {
+            Some(TokenOccurrence {
+                token: Token::Word(ref k),
+                ..
+            }) if k.keyword == "CHECK" => {
                 self.expect_token(&Token::LParen)?;
                 let expr = Box::new(self.parse_expr()?);
                 self.expect_token(&Token::RParen)?;
@@ -1145,7 +1208,7 @@ impl Parser {
         let mut values = vec![];
         let mut content = String::from("");
         while let Some(t) = self.next_token_no_skip() {
-            match t {
+            match t.token {
                 Token::Whitespace(Whitespace::Tab) => {
                     values.push(Some(content.to_string()));
                     content.clear();
@@ -1158,8 +1221,8 @@ impl Parser {
                     if self.consume_token(&Token::Period) {
                         return Ok(values);
                     }
-                    if let Some(token) = self.next_token() {
-                        if let Token::Word(Word { value: v, .. }) = token {
+                    if let Some(to) = self.next_token() {
+                        if let Token::Word(Word { value: v, .. }) = to.token {
                             if v == "N" {
                                 values.push(None);
                             }
@@ -1179,7 +1242,7 @@ impl Parser {
     /// Parse a literal value (numbers, strings, date/time, booleans)
     fn parse_value(&mut self) -> Result<Value, ParserError> {
         match self.next_token() {
-            Some(t) => match t {
+            Some(t) => match t.token {
                 Token::Word(k) => match k.keyword.as_ref() {
                     "TRUE" => Ok(Value::Boolean(true)),
                     "FALSE" => Ok(Value::Boolean(false)),
@@ -1219,7 +1282,10 @@ impl Parser {
     /// Parse an unsigned literal integer/long
     pub fn parse_literal_uint(&mut self) -> Result<u64, ParserError> {
         match self.next_token() {
-            Some(Token::Number(s)) => s.parse::<u64>().map_err(|e| {
+            Some(TokenOccurrence {
+                token: Token::Number(s),
+                ..
+            }) => s.parse::<u64>().map_err(|e| {
                 ParserError::ParserError(format!("Could not parse '{}' as u64: {}", s, e))
             }),
             other => self.expected("literal int", other),
@@ -1229,7 +1295,10 @@ impl Parser {
     /// Parse a literal string
     pub fn parse_literal_string(&mut self) -> Result<String, ParserError> {
         match self.next_token() {
-            Some(Token::SingleQuotedString(ref s)) => Ok(s.clone()),
+            Some(TokenOccurrence {
+                token: Token::SingleQuotedString(ref s),
+                ..
+            }) => Ok(s.clone()),
             other => self.expected("literal string", other),
         }
     }
@@ -1237,7 +1306,10 @@ impl Parser {
     /// Parse a SQL datatype (in the context of a CREATE TABLE statement for example)
     pub fn parse_data_type(&mut self) -> Result<DataType, ParserError> {
         match self.next_token() {
-            Some(Token::Word(k)) => match k.keyword.as_ref() {
+            Some(TokenOccurrence {
+                token: Token::Word(k),
+                ..
+            }) => match k.keyword.as_ref() {
                 "BOOLEAN" => Ok(DataType::Boolean),
                 "FLOAT" => Ok(DataType::Float(self.parse_optional_precision()?)),
                 "REAL" => Ok(DataType::Real),
@@ -1315,14 +1387,18 @@ impl Parser {
             // which may start a construct allowed in this position, to be parsed as aliases.
             // (For example, in `FROM t1 JOIN` the `JOIN` will always be parsed as a keyword,
             // not an alias.)
-            Some(Token::Word(ref w))
-                if after_as || !reserved_kwds.contains(&w.keyword.as_str()) =>
-            {
+            Some(TokenOccurrence {
+                token: Token::Word(ref w),
+                ..
+            }) if after_as || !reserved_kwds.contains(&w.keyword.as_str()) => {
                 Ok(Some(w.to_ident()))
             }
             // MSSQL supports single-quoted strings as aliases for columns
             // We accept them as table aliases too, although MSSQL does not.
-            Some(Token::SingleQuotedString(ref s)) => Ok(Some(Ident::with_quote('\'', s.clone()))),
+            Some(TokenOccurrence {
+                token: Token::SingleQuotedString(ref s),
+                ..
+            }) => Ok(Some(Ident::with_quote('\'', s.clone()))),
             not_an_ident => {
                 if after_as {
                     return self.expected("an identifier after AS", not_an_ident);
@@ -1366,7 +1442,10 @@ impl Parser {
     /// Parse a simple one-word identifier (possibly quoted, possibly a keyword)
     pub fn parse_identifier(&mut self) -> Result<Ident, ParserError> {
         match self.next_token() {
-            Some(Token::Word(w)) => Ok(w.to_ident()),
+            Some(TokenOccurrence {
+                token: Token::Word(w),
+                ..
+            }) => Ok(w.to_ident()),
             unexpected => self.expected("identifier", unexpected),
         }
     }
@@ -1544,11 +1623,17 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_set_operator(&mut self, token: &Option<Token>) -> Option<SetOperator> {
-        match token {
-            Some(Token::Word(w)) if w.keyword == "UNION" => Some(SetOperator::Union),
-            Some(Token::Word(w)) if w.keyword == "EXCEPT" => Some(SetOperator::Except),
-            Some(Token::Word(w)) if w.keyword == "INTERSECT" => Some(SetOperator::Intersect),
+    fn parse_set_operator(&mut self, to: &Option<TokenOccurrence>) -> Option<SetOperator> {
+        match to {
+            Some(TokenOccurrence {
+                token: Token::Word(w),
+                ..
+            }) => match w.value.as_str() {
+                "UNION" => Some(SetOperator::Union),
+                "EXCEPT" => Some(SetOperator::Except),
+                "INTERSECT" => Some(SetOperator::Intersect),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1617,7 +1702,13 @@ impl Parser {
             let token = self.peek_token();
             let value = match (self.parse_value(), token) {
                 (Ok(value), _) => SetVariableValue::Literal(value),
-                (Err(_), Some(Token::Word(ident))) => SetVariableValue::Ident(ident.to_ident()),
+                (
+                    Err(_),
+                    Some(TokenOccurrence {
+                        token: Token::Word(ident),
+                        ..
+                    }),
+                ) => SetVariableValue::Ident(ident.to_ident()),
                 (Err(_), other) => self.expected("variable value", other)?,
             };
             Ok(Statement::SetVariable {
@@ -1708,7 +1799,7 @@ impl Parser {
                 }
             } else {
                 let natural = self.parse_keyword("NATURAL");
-                let peek_keyword = if let Some(Token::Word(kw)) = self.peek_token() {
+                let peek_keyword = if let Some(Token::Word(kw)) = self.peek_token_plain() {
                     kw.keyword
                 } else {
                     String::default()
@@ -2110,19 +2201,19 @@ mod tests {
     fn test_prev_index() {
         let sql = "SELECT version";
         all_dialects().run_parser_method(sql, |parser| {
-            assert_eq!(parser.peek_token(), Some(Token::make_keyword("SELECT")));
-            assert_eq!(parser.next_token(), Some(Token::make_keyword("SELECT")));
+            assert_eq!(parser.peek_token_plain(), Some(Token::make_keyword("SELECT")));
+            assert_eq!(parser.next_token_plain(), Some(Token::make_keyword("SELECT")));
             parser.prev_token();
-            assert_eq!(parser.next_token(), Some(Token::make_keyword("SELECT")));
-            assert_eq!(parser.next_token(), Some(Token::make_word("version", None)));
+            assert_eq!(parser.next_token_plain(), Some(Token::make_keyword("SELECT")));
+            assert_eq!(parser.next_token_plain(), Some(Token::make_word("version", None)));
             parser.prev_token();
-            assert_eq!(parser.peek_token(), Some(Token::make_word("version", None)));
-            assert_eq!(parser.next_token(), Some(Token::make_word("version", None)));
-            assert_eq!(parser.peek_token(), None);
+            assert_eq!(parser.peek_token_plain(), Some(Token::make_word("version", None)));
+            assert_eq!(parser.next_token_plain(), Some(Token::make_word("version", None)));
+            assert_eq!(parser.peek_token_plain(), None);
             parser.prev_token();
-            assert_eq!(parser.next_token(), Some(Token::make_word("version", None)));
-            assert_eq!(parser.next_token(), None);
-            assert_eq!(parser.next_token(), None);
+            assert_eq!(parser.next_token_plain(), Some(Token::make_word("version", None)));
+            assert_eq!(parser.next_token_plain(), None);
+            assert_eq!(parser.next_token_plain(), None);
             parser.prev_token();
         });
     }
