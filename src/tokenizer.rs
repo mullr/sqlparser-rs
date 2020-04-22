@@ -23,16 +23,25 @@ use super::dialect::keywords::ALL_KEYWORDS;
 use super::dialect::Dialect;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct LineColumn {
     pub line: u64,
     pub column: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: LineColumn,
     pub end: LineColumn,
+}
+
+impl Span {
+    pub fn empty() -> Span {
+        Span {
+            start: LineColumn { line: 0, column: 0 },
+            end: LineColumn { line: 0, column: 0 },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -845,7 +854,7 @@ mod tests {
     }
 
     fn compare(expected: Vec<Token>, actual: Vec<TokenOccurrence>) {
-        let actual: Vec<_> =  actual.into_iter().map(|to| to.token).collect();
+        let actual: Vec<_> = actual.into_iter().map(|to| to.token).collect();
         //println!("------------------------------");
         //println!("tokens   = {:?}", actual);
         //println!("expected = {:?}", expected);

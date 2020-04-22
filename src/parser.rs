@@ -176,10 +176,11 @@ impl Parser {
 
     /// Parse an expression prefix
     pub fn parse_prefix(&mut self) -> Result<Expr, ParserError> {
-        let token_occurrence = self
+        let TokenOccurrence { token, span } = self
             .next_token()
             .ok_or_else(|| ParserError::ParserError("Unexpected EOF".to_string()))?;
-        let expr = match token_occurrence.token {
+
+        let expr = match token {
             Token::Word(w) => match w.keyword.as_ref() {
                 "TRUE" | "FALSE" | "NULL" => {
                     self.prev_token();
@@ -201,14 +202,14 @@ impl Parser {
                 // identifier, a function call, or a simple identifier:
                 _ => match self.peek_token_plain() {
                     Some(Token::LParen) | Some(Token::Period) => {
-                        let mut id_parts: Vec<Ident> = vec![w.to_ident()];
+                        let mut id_parts: Vec<Ident> = vec![w.to_ident(span)];
                         let mut ends_with_wildcard = false;
                         while self.consume_token(&Token::Period) {
                             match self.next_token() {
                                 Some(TokenOccurrence {
                                     token: Token::Word(w),
-                                    ..
-                                }) => id_parts.push(w.to_ident()),
+                                    span,
+                                }) => id_parts.push(w.to_ident(span)),
                                 Some(TokenOccurrence {
                                     token: Token::Mult, ..
                                 }) => {
@@ -230,7 +231,7 @@ impl Parser {
                             Ok(Expr::CompoundIdentifier(id_parts))
                         }
                     }
-                    _ => Ok(Expr::Identifier(w.to_ident())),
+                    _ => Ok(Expr::Identifier(w.to_ident(span))),
                 },
             }, // End of Token::Word
             Token::Mult => Ok(Expr::Wildcard),
@@ -262,7 +263,7 @@ impl Parser {
                 self.expect_token(&Token::RParen)?;
                 Ok(expr)
             }
-            _ => self.expected("an expression", Some(token_occurrence)),
+            _ => self.expected("an expression", Some(TokenOccurrence { token, span })),
         }?;
 
         if self.parse_keyword("COLLATE") {
@@ -733,7 +734,6 @@ impl Parser {
         }
     }
 
-
     #[cfg(test)]
     /// Like next_token, but return the inner Token without the span
     pub fn next_token_plain(&mut self) -> Option<Token> {
@@ -1013,7 +1013,11 @@ impl Parser {
         loop {
             if let Some(constraint) = self.parse_optional_table_constraint()? {
                 constraints.push(constraint);
-            } else if let Some(Token::Word(column_name)) = self.peek_token_plain() {
+            } else if let Some(TokenOccurrence {
+                token: Token::Word(column_name),
+                span,
+            }) = self.peek_token()
+            {
                 self.next_token();
                 let data_type = self.parse_data_type()?;
                 let collation = if self.parse_keyword("COLLATE") {
@@ -1030,7 +1034,7 @@ impl Parser {
                 }
 
                 columns.push(ColumnDef {
-                    name: column_name.to_ident(),
+                    name: column_name.to_ident(span),
                     data_type,
                     collation,
                     options,
@@ -1389,16 +1393,16 @@ impl Parser {
             // not an alias.)
             Some(TokenOccurrence {
                 token: Token::Word(ref w),
-                ..
+                span,
             }) if after_as || !reserved_kwds.contains(&w.keyword.as_str()) => {
-                Ok(Some(w.to_ident()))
+                Ok(Some(w.to_ident(span)))
             }
             // MSSQL supports single-quoted strings as aliases for columns
             // We accept them as table aliases too, although MSSQL does not.
             Some(TokenOccurrence {
                 token: Token::SingleQuotedString(ref s),
-                ..
-            }) => Ok(Some(Ident::with_quote('\'', s.clone()))),
+                span,
+            }) => Ok(Some(Ident::with_quote('\'', s.clone()).with_span(span))),
             not_an_ident => {
                 if after_as {
                     return self.expected("an identifier after AS", not_an_ident);
@@ -1444,8 +1448,8 @@ impl Parser {
         match self.next_token() {
             Some(TokenOccurrence {
                 token: Token::Word(w),
-                ..
-            }) => Ok(w.to_ident()),
+                span,
+            }) => Ok(w.to_ident(span)),
             unexpected => self.expected("identifier", unexpected),
         }
     }
@@ -1706,9 +1710,9 @@ impl Parser {
                     Err(_),
                     Some(TokenOccurrence {
                         token: Token::Word(ident),
-                        ..
+                        span,
                     }),
-                ) => SetVariableValue::Ident(ident.to_ident()),
+                ) => SetVariableValue::Ident(ident.to_ident(span)),
                 (Err(_), other) => self.expected("variable value", other)?,
             };
             Ok(Statement::SetVariable {
@@ -2184,10 +2188,11 @@ impl Parser {
 }
 
 impl Word {
-    pub fn to_ident(&self) -> Ident {
+    pub fn to_ident(&self, span: Span) -> Ident {
         Ident {
             value: self.value.clone(),
             quote_style: self.quote_style,
+            span,
         }
     }
 }
@@ -2198,6 +2203,7 @@ mod tests {
     use crate::test_utils::all_dialects;
 
     #[test]
+    #[rustfmt::skip]
     fn test_prev_index() {
         let sql = "SELECT version";
         all_dialects().run_parser_method(sql, |parser| {

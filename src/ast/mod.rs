@@ -18,7 +18,10 @@ mod operator;
 mod query;
 mod value;
 
+use derivative::Derivative;
 use std::fmt;
+
+pub use crate::tokenizer::Span;
 
 pub use self::data_type::DataType;
 pub use self::ddl::{
@@ -68,9 +71,34 @@ where
     DisplaySeparated { slice, sep: ", " }
 }
 
+pub trait Spanned {
+    fn span(self) -> Span;
+    fn with_span(self, span: Span) -> Self;
+}
+
+macro_rules! impl_spanned {
+    ($ty:ty) => {
+        impl Spanned for $ty {
+            fn span(self) -> Span {
+                self.span
+            }
+
+            fn with_span(mut self, span: Span) -> Self {
+                self.span = span;
+                self
+            }
+        }
+    };
+}
+
 /// An identifier, decomposed into its value or character data and the quote style.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq, Derivative)]
+#[derivative(PartialEq, Hash)]
 pub struct Ident {
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub span: Span,
+
     /// The value of the identifier without quotes.
     pub value: String,
     /// The starting quote if any. Valid quote characters are the single quote,
@@ -78,8 +106,11 @@ pub struct Ident {
     pub quote_style: Option<char>,
 }
 
+impl_spanned!(Ident);
+
 impl Ident {
-    /// Create a new identifier with the given value and no quotes.
+    /// Create a new identifier with the given value and no quotes, and an empty
+    /// span.
     pub fn new<S>(value: S) -> Self
     where
         S: Into<String>,
@@ -87,6 +118,7 @@ impl Ident {
         Ident {
             value: value.into(),
             quote_style: None,
+            span: Span::empty(),
         }
     }
 
@@ -100,6 +132,7 @@ impl Ident {
         Ident {
             value: value.into(),
             quote_style: Some(quote),
+            span: Span::empty(),
         }
     }
 }
@@ -109,6 +142,7 @@ impl From<&str> for Ident {
         Ident {
             value: value.to_string(),
             quote_style: None,
+            span: Span::empty(),
         }
     }
 }
